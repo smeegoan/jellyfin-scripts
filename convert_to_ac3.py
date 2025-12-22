@@ -41,7 +41,7 @@ class VideoProcessor:
         audio_cmd = [
             'ffprobe', '-v', 'error',
             '-select_streams', 'a',
-            '-show_entries', 'stream=index,codec_name,bit_rate,channels:stream_tags=language',
+            '-show_entries', 'stream=index,codec_name,bit_rate,channels:stream_tags=language,title',
             '-of', 'json',
             str(file_path)
         ]
@@ -55,6 +55,9 @@ class VideoProcessor:
             if not lang or lang == 'und':
                 lang = 'unknown'
             
+            # Get title/description
+            title = stream.get('tags', {}).get('title', '').lower()
+            
             # Get bitrate (may not always be available)
             bitrate = stream.get('bit_rate')
             bitrate_kbps = int(bitrate) // 1000 if bitrate else 0
@@ -66,6 +69,7 @@ class VideoProcessor:
                 'index': stream['index'],
                 'codec': stream['codec_name'].lower(),
                 'language': lang,
+                'title': title,
                 'bitrate': bitrate_kbps,
                 'channels': channels
             })
@@ -146,9 +150,10 @@ class VideoProcessor:
             for stream in audio_streams:
                 bitrate_str = f"{stream['bitrate']}kbps" if stream['bitrate'] > 0 else "unknown"
                 channel_str = f"{stream['channels']}ch" if stream['channels'] > 0 else "unknown"
+                title_str = f", Title: {stream['title']}" if stream['title'] else ""
                 print(f"Parsed Audio Stream: Index {stream['index']}, "
                       f"Codec {stream['codec']}, Language {stream['language']}, "
-                      f"Bitrate {bitrate_str}, Channels {channel_str}")
+                      f"Bitrate {bitrate_str}, Channels {channel_str}{title_str}")
             
             for stream in subtitle_streams:
                 print(f"Parsed Subtitle Stream: Index {stream['index']}, "
@@ -164,8 +169,17 @@ class VideoProcessor:
             
             # Only filter audio if we have tracks in our desired languages
             # This prevents removing all audio when no English/Portuguese exists
+            # Also skip commentary tracks (keep them regardless of language)
             if has_known_desired_lang:
-                audio_streams = self.filter_streams_by_language(audio_streams)
+                filtered_audio = []
+                for s in audio_streams:
+                    # Keep if: in desired language OR is commentary
+                    is_commentary = 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']
+                    if s['language'] in self.desired_languages or is_commentary:
+                        filtered_audio.append(s)
+                        if is_commentary:
+                            print(f"Keeping commentary track: Index {s['index']}")
+                audio_streams = filtered_audio
             
             subtitle_streams = self.filter_streams_by_language(subtitle_streams)
             
@@ -180,13 +194,21 @@ class VideoProcessor:
                 print(f"Filtering subtitles: Keeping only English/Portuguese tracks "
                       f"({len(subtitle_streams)} of {original_sub_count})")
             
-            # Find the single best audio stream by channel count, then bitrate
+            # Find the single best audio stream by channel count, then bitrate.
+            # Exclude commentary tracks from selection (they should be kept but not selected as primary)
             if not audio_streams:
                 print(f"Skipping: {file_path.name} (no audio streams after language filtering)")
                 return False
+
+            # Filter out commentary tracks for selection purposes
+            non_commentary = [s for s in audio_streams if 'commentary' not in s['title'] and 'comentário' not in s['title'] and 'comentario' not in s['title']]
             
-            # Sort by channels (descending), then bitrate (descending)
-            best_stream = max(audio_streams, key=lambda s: (s['channels'], s['bitrate']))
+            if not non_commentary:
+                print(f"Skipping: {file_path.name} (only commentary tracks found)")
+                return False
+
+            # Select stream with most channels, then highest bitrate (from non-commentary)
+            best_stream = max(non_commentary, key=lambda s: (s['channels'], s['bitrate']))
             
             print(f"\nBest audio stream: Index {best_stream['index']}, "
                   f"Codec {best_stream['codec']}, {best_stream['channels']}ch, "
@@ -207,11 +229,8 @@ class VideoProcessor:
                 target_bitrate = 448
                 target_desc = "E-AC3/AC3 stereo"
             
-            # Check if current stream is already good quality AC3/E-AC3
-            is_already_good = (
-                best_stream['codec'] in ('ac3', 'eac3') and
-                (best_stream['bitrate'] >= target_bitrate or best_stream['bitrate'] == 0)
-            )
+            # Check if current stream is already AC3/E-AC3 (both are supported, keep as-is)
+            is_already_good = best_stream['codec'] in ('ac3', 'eac3')
             
             # Determine if we need to process
             needs_processing = (
@@ -255,8 +274,8 @@ class VideoProcessor:
         
         cmd.extend(['-i', str(input_file)])
         
-        # Map video
-        cmd.extend(['-map', '0:v'])
+        # Map video - use 0:v:0 to be explicit about first video stream
+        cmd.extend(['-map', '0:v:0'])
         
         # Map audio streams
         for stream in audio_streams:
@@ -275,6 +294,11 @@ class VideoProcessor:
             cmd.extend(['-c:a', 'copy'])
         
         cmd.extend(['-c:s', 'copy'])
+        
+        # Preserve all metadata including HDR
+        cmd.extend(['-map_metadata', '0'])
+        cmd.extend(['-movflags', 'use_metadata_tags'])
+        
         cmd.append(str(output_file))
         
         return cmd
@@ -474,8 +498,8 @@ class VideoProcessor:
         
         cmd.extend(['-i', str(file_path)])
         
-        # Map video
-        cmd.extend(['-map', '0:v'])
+        # Map video - use 0:v:0 to be explicit
+        cmd.extend(['-map', '0:v:0'])
         
         # Map single audio stream
         cmd.extend(['-map', f'0:{stream["index"]}'])
@@ -488,6 +512,11 @@ class VideoProcessor:
         cmd.extend(['-c:v', 'copy'])
         cmd.extend(['-c:a', 'eac3', '-b:a', bitrate, '-threads', '0'])
         cmd.extend(['-c:s', 'copy'])
+        
+        # Preserve all metadata including HDR
+        cmd.extend(['-map_metadata', '0'])
+        cmd.extend(['-movflags', 'use_metadata_tags'])
+        
         cmd.append(str(output_file))
         
         # Extract bitrate value (e.g., '1536k' -> 1536)
@@ -544,8 +573,8 @@ class VideoProcessor:
         
         cmd.extend(['-i', str(input_file)])
         
-        # Map video
-        cmd.extend(['-map', '0:v'])
+        # Map video - use 0:v:0 to be explicit
+        cmd.extend(['-map', '0:v:0'])
         
         # Map all audio streams (copy + convert)
         all_audio = copy_streams + convert_streams
@@ -582,6 +611,11 @@ class VideoProcessor:
         
         cmd.extend(['-threads', '0'])
         cmd.extend(['-c:s', 'copy'])
+        
+        # Preserve all metadata including HDR
+        cmd.extend(['-map_metadata', '0'])
+        cmd.extend(['-movflags', 'use_metadata_tags'])
+        
         cmd.append(str(output_file))
         
         return cmd
@@ -618,8 +652,8 @@ class VideoProcessor:
         
         cmd.extend(['-i', str(input_file)])
         
-        # Map video
-        cmd.extend(['-map', '0:v'])
+        # Map video - use 0:v:0 to be explicit
+        cmd.extend(['-map', '0:v:0'])
         
         # Map all audio streams (copy + convert)
         all_audio = copy_streams + convert_streams
@@ -642,6 +676,11 @@ class VideoProcessor:
         
         cmd.extend(['-threads', '0'])
         cmd.extend(['-c:s', 'copy'])
+        
+        # Preserve all metadata including HDR
+        cmd.extend(['-map_metadata', '0'])
+        cmd.extend(['-movflags', 'use_metadata_tags'])
+        
         cmd.append(str(output_file))
         
         return cmd
