@@ -5,7 +5,6 @@ A small collection of utility scripts commonly used with Jellyfin media servers.
 Files in this repository
 
 - [convert_to_ac3.py](convert_to_ac3.py) — Python script that inspects video files and converts or normalizes audio streams to AC3/E-AC3, filters tracks by language, and removes unwanted streams.
-- [DownloadTrailers.ps1](DownloadTrailers.ps1) — PowerShell helper to download movie trailers.
  - [download_trailers.py](download_trailers.py) — Python version of the trailer downloader (TMDb lookup + yt-dlp). See usage below.
 - [requirements.txt](requirements.txt) — Optional Python dependencies (e.g., python-dotenv).
 - [LICENSE](LICENSE) — Project license.
@@ -102,7 +101,6 @@ Notes and troubleshooting
 - Ensure `ffmpeg` and `ffprobe` are installed and available on PATH. If the script fails when calling these tools, fix your PATH or install a build of `ffmpeg` that includes `ffprobe`.
 - The script renames the original file to `*_old.ext` and replaces it with the converted file. When using a separate temp directory, converted files are copied back into place and temp files are removed.
 - Hardware acceleration flags are advisory; only use them if your `ffmpeg` build supports the chosen accelerator.
-- `DownloadTrailers.ps1` is a PowerShell helper for downloading trailers — run it from PowerShell on Windows.
 
 Support and contributions
 
@@ -113,8 +111,6 @@ License
 See [LICENSE](LICENSE).
 
 Trailer downloader (Python)
-
-This repository now includes `download_trailers.py`, a cross-platform Python implementation of the original PowerShell `DownloadTrailers.ps1`.
 
 Basic usage:
 
