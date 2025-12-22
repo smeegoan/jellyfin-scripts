@@ -207,8 +207,17 @@ class VideoProcessor:
                 print(f"Skipping: {file_path.name} (only commentary tracks found)")
                 return False
 
-            # Select stream with most channels, then highest bitrate (from non-commentary)
-            best_stream = max(non_commentary, key=lambda s: (s['channels'], s['bitrate']))
+            # Prefer existing AC3/E-AC3 streams over lossless formats that need conversion
+            # This avoids unnecessary conversion and potential quality loss
+            ac3_streams = [s for s in non_commentary if s['codec'] in ('ac3', 'eac3')]
+            
+            if ac3_streams:
+                # Select best AC3/E-AC3 stream by channels, then bitrate
+                best_stream = max(ac3_streams, key=lambda s: (s['channels'], s['bitrate']))
+                print(f"Found existing AC3/E-AC3 stream - will use instead of converting")
+            else:
+                # No AC3/E-AC3 available, select stream with most channels for conversion
+                best_stream = max(non_commentary, key=lambda s: (s['channels'], s['bitrate']))
             
             print(f"\nBest audio stream: Index {best_stream['index']}, "
                   f"Codec {best_stream['codec']}, {best_stream['channels']}ch, "
@@ -355,7 +364,7 @@ class VideoProcessor:
             
             # Start ffmpeg
             process = subprocess.Popen(cmd_with_progress, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
+                                      stderr=subprocess.PIPE, text=False)
             
             start_time = time.time()
             last_update = 0
@@ -425,12 +434,35 @@ class VideoProcessor:
                         last_update = time.time()
             
             # Wait for completion
-            process.wait()
-            print(f"\rProgress: 100% - Complete!                                    ", flush=True)
-            print()  # New line after completion
+            stdout_data, stderr_data = process.communicate()
             
-            success = process.returncode == 0
-            return success
+            # Check if successful
+            if process.returncode == 0:
+                print(f"\rProgress: 100% - Complete!                                    ", flush=True)
+                print()  # New line after completion
+                
+                # Verify output file exists and has content
+                if not output_file.exists():
+                    print(f"ERROR: Output file was not created: {output_file}")
+                    return False
+                
+                output_size = output_file.stat().st_size
+                if output_size == 0:
+                    print(f"ERROR: Output file is empty (0 bytes): {output_file}")
+                    return False
+                
+                return True
+            else:
+                print(f"\rProgress: FAILED!                                             ")
+                print(f"\nffmpeg exited with error code {process.returncode}")
+                
+                # Display stderr
+                if stderr_data:
+                    stderr_output = stderr_data.decode('utf-8', errors='replace')
+                    print("\nffmpeg error output:")
+                    print(stderr_output)
+                
+                return False
         
         except Exception as e:
             print(f"\nError during ffmpeg execution: {e}")
@@ -466,18 +498,23 @@ class VideoProcessor:
         channels = stream['channels']
         
         # Determine bitrate based on channel count
+        # Note: E-AC3 only supports up to 5.1, so 7.1+ will be downmixed to 5.1
         if channels >= 7:
-            bitrate = '1536k'
-            desc = f"E-AC3 7.1+ @ {bitrate}"
+            bitrate = '768k'
+            desc = f"E-AC3 5.1 (downmixed from 7.1+) @ {bitrate}"
+            target_channels = 6
         elif channels >= 6:
             bitrate = '768k'
             desc = f"E-AC3 5.1 @ {bitrate}"
+            target_channels = 6
         elif channels >= 3:
             bitrate = '640k'
             desc = f"E-AC3 @ {bitrate}"
+            target_channels = channels
         else:
             bitrate = '448k'
             desc = f"E-AC3 stereo @ {bitrate}"
+            target_channels = 2
         
         print(f"Processing: {file_path.name}")
         print(f"  Converting stream {stream['index']}: {stream['codec']} {channels}ch → {desc}")
@@ -510,7 +547,20 @@ class VideoProcessor:
         
         # Set codecs
         cmd.extend(['-c:v', 'copy'])
-        cmd.extend(['-c:a', 'eac3', '-b:a', bitrate, '-threads', '0'])
+        
+        # E-AC3 encoding with explicit channel preservation
+        cmd.extend(['-c:a', 'eac3', '-b:a', bitrate])
+        
+        # Explicitly set target channel count (E-AC3 only supports up to 5.1)
+        if target_channels == 6:
+            # 5.1 layout: FL+FR+FC+LFE+BL+BR
+            cmd.extend(['-ac', '6'])
+        elif target_channels == 2:
+            # Stereo
+            cmd.extend(['-ac', '2'])
+        # For other channel counts, let ffmpeg handle it automatically
+        
+        cmd.extend(['-threads', '0'])
         cmd.extend(['-c:s', 'copy'])
         
         # Preserve all metadata including HDR
@@ -597,12 +647,12 @@ class VideoProcessor:
                 # Convert lossless to E-AC3 or AC3 based on channel count
                 channels = stream['channels']
                 if channels >= 7:
-                    # 7.1 or higher - use E-AC3 at 1536 kbps
-                    cmd.extend([f'-c:a:{i}', 'eac3', f'-b:a:{i}', '1536k'])
+                    # 7.1 or higher - use E-AC3 at 1536 kbps with explicit channel count
+                    cmd.extend([f'-c:a:{i}', 'eac3', f'-b:a:{i}', '1536k', f'-ac:a:{i}', '8'])
                     print(f"  - Stream {stream['index']}: {stream['codec']} {channels}ch → E-AC3 7.1 @ 1536kbps")
                 elif channels >= 6:
-                    # 5.1 - use E-AC3 at 768 kbps for better quality
-                    cmd.extend([f'-c:a:{i}', 'eac3', f'-b:a:{i}', '768k'])
+                    # 5.1 - use E-AC3 at 768 kbps with explicit channel count
+                    cmd.extend([f'-c:a:{i}', 'eac3', f'-b:a:{i}', '768k', f'-ac:a:{i}', '6'])
                     print(f"  - Stream {stream['index']}: {stream['codec']} {channels}ch → E-AC3 5.1 @ 768kbps")
                 else:
                     # Stereo or less - use AC3 at 640 kbps
@@ -737,16 +787,26 @@ class VideoProcessor:
     def _finalize_output(self, original_file: Path, output_file: Path) -> bool:
         """Replace original with converted file."""
         try:
-            backup_file = original_file.parent / f"{original_file.stem}_old{original_file.suffix}"
+            # Use timestamp for backup to avoid accumulating _old suffixes
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            # Remove any existing _old suffixes from the stem to prevent accumulation
+            stem = original_file.stem
+            while stem.endswith('_old'):
+                stem = stem[:-4]
+            
+            backup_file = original_file.parent / f"{stem}_backup_{timestamp}{original_file.suffix}"
             
             # If using temp directory, copy back with progress
             if self.temp_dir and output_file.parent != original_file.parent:
                 print("Copying converted file from temp directory to final location...")
                 
-                # Rename original
-                original_file.rename(backup_file)
+                # Rename original to backup
+                if original_file.exists():
+                    original_file.rename(backup_file)
                 
-                # Copy with progress
+                # Copy from temp to final location
                 file_size = output_file.stat().st_size
                 copied = 0
                 last_update = time.time()
@@ -772,18 +832,25 @@ class VideoProcessor:
                 # Remove temp file
                 output_file.unlink()
             else:
-                # Simple rename
+                # Simple rename (same directory)
                 original_file.rename(backup_file)
                 output_file.rename(original_file)
             
             print(f"Successfully processed: {original_file.name}")
+            print(f"Backup saved as: {backup_file.name}")
             return True
         
         except Exception as e:
             print(f"Error finalizing output for {original_file.name}: {e}")
+            import traceback
+            traceback.print_exc()
             # Try to restore backup
-            if backup_file.exists():
-                backup_file.rename(original_file)
+            if backup_file.exists() and not original_file.exists():
+                try:
+                    backup_file.rename(original_file)
+                    print("Restored original file from backup")
+                except Exception as restore_e:
+                    print(f"Failed to restore backup: {restore_e}")
             return False
 
 
