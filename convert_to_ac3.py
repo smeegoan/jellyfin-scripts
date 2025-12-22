@@ -241,25 +241,35 @@ class VideoProcessor:
             # Check if current stream is already AC3/E-AC3 (both are supported, keep as-is)
             is_already_good = best_stream['codec'] in ('ac3', 'eac3')
             
+            # Check if ALL audio streams are already AC3/E-AC3 (main + commentary)
+            all_ac3 = all(s['codec'] in ('ac3', 'eac3') for s in audio_streams)
+            
             # Determine if we need to process
             needs_processing = (
-                len(audio_streams) > 1 or  # Multiple streams exist
                 needs_language_filtering or  # Language filtering needed
-                not is_already_good  # Stream needs conversion
+                not is_already_good or  # Main stream needs conversion
+                (len(audio_streams) > 1 and not all_ac3)  # Multiple streams but not all AC3/E-AC3
             )
             
             if not needs_processing:
-                print(f"Skipping: {file_path.name} (already has single {target_desc} track)")
+                print(f"Skipping: {file_path.name} (already optimal - AC3/E-AC3 audio with correct languages)")
                 return False
             
             # Process: either copy best stream or convert to E-AC3
             if is_already_good:
                 # Best stream is already good AC3/E-AC3, just strip others
-                return self._process_keep_single_stream(file_path, best_stream,
+                # But keep commentary tracks!
+                commentary_tracks = [s for s in audio_streams if 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']]
+                streams_to_keep = [best_stream] + commentary_tracks
+                
+                return self._process_keep_single_stream(file_path, streams_to_keep,
                                                        subtitle_streams, duration, fps)
             else:
                 # Convert best stream to E-AC3 at appropriate bitrate
-                return self._process_convert_single_to_eac3(file_path, best_stream,
+                # Keep commentary tracks as-is
+                commentary_tracks = [s for s in audio_streams if 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']]
+                
+                return self._process_convert_single_to_eac3(file_path, best_stream, commentary_tracks,
                                                            subtitle_streams, duration, fps)
         
         except Exception as e:
@@ -477,24 +487,25 @@ class VideoProcessor:
             except:
                 pass  # Ignore cleanup errors
     
-    def _process_keep_single_stream(self, file_path: Path, stream: Dict,
+    def _process_keep_single_stream(self, file_path: Path, streams: List[Dict],
                                    subtitle_streams: List[Dict], duration: float, fps: float) -> bool:
-        """Keep only the single best stream, strip everything else."""
-        print(f"Processing: {file_path.name} - Keeping stream {stream['index']}, stripping all others")
+        """Keep only the specified streams (main + commentary), strip everything else."""
+        stream_desc = f"{len(streams)} stream(s)" if len(streams) > 1 else f"stream {streams[0]['index']}"
+        print(f"Processing: {file_path.name} - Keeping {stream_desc}, stripping all others")
         print("(Fast mode: copying stream, no encoding)")
         
         output_file = self._get_output_path(file_path)
-        cmd = self._build_ffmpeg_command(file_path, output_file, [stream],
+        cmd = self._build_ffmpeg_command(file_path, output_file, streams,
                                          subtitle_streams, audio_codec='copy')
         
         if self._run_ffmpeg_with_progress(cmd, duration, fps, file_path.name):
             return self._finalize_output(file_path, output_file)
         return False
     
-    def _process_convert_single_to_eac3(self, file_path: Path, stream: Dict,
+    def _process_convert_single_to_eac3(self, file_path: Path, stream: Dict, commentary_tracks: List[Dict],
                                        subtitle_streams: List[Dict], duration: float, 
                                        fps: float) -> bool:
-        """Convert single stream to E-AC3 at appropriate bitrate based on channels."""
+        """Convert single stream to E-AC3 at appropriate bitrate based on channels, keep commentary as-is."""
         channels = stream['channels']
         
         # Determine bitrate based on channel count
@@ -538,8 +549,12 @@ class VideoProcessor:
         # Map video - use 0:v:0 to be explicit
         cmd.extend(['-map', '0:v:0'])
         
-        # Map single audio stream
+        # Map main audio stream
         cmd.extend(['-map', f'0:{stream["index"]}'])
+        
+        # Map commentary streams
+        for commentary in commentary_tracks:
+            cmd.extend(['-map', f'0:{commentary["index"]}'])
         
         # Map subtitle streams
         for sub in subtitle_streams:
@@ -548,17 +563,21 @@ class VideoProcessor:
         # Set codecs
         cmd.extend(['-c:v', 'copy'])
         
-        # E-AC3 encoding with explicit channel preservation
-        cmd.extend(['-c:a', 'eac3', '-b:a', bitrate])
+        # E-AC3 encoding with explicit channel preservation for main stream
+        cmd.extend(['-c:a:0', 'eac3', '-b:a:0', bitrate])
         
-        # Explicitly set target channel count (E-AC3 only supports up to 5.1)
+        # Explicitly set target channel count for main stream (E-AC3 only supports up to 5.1)
         if target_channels == 6:
             # 5.1 layout: FL+FR+FC+LFE+BL+BR
-            cmd.extend(['-ac', '6'])
+            cmd.extend(['-ac:a:0', '6'])
         elif target_channels == 2:
             # Stereo
-            cmd.extend(['-ac', '2'])
+            cmd.extend(['-ac:a:0', '2'])
         # For other channel counts, let ffmpeg handle it automatically
+        
+        # Copy commentary streams as-is
+        for i in range(len(commentary_tracks)):
+            cmd.extend([f'-c:a:{i+1}', 'copy'])
         
         cmd.extend(['-threads', '0'])
         cmd.extend(['-c:s', 'copy'])
