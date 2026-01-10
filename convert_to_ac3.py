@@ -34,6 +34,11 @@ class VideoProcessor:
         if languages is None:
             languages = ['eng', 'en', 'por', 'pt', 'english', 'portuguese', 'unknown', 'und']
         self.desired_languages = {lang.lower() for lang in languages}
+    
+    def is_commentary_track(self, stream: Dict) -> bool:
+        """Check if an audio stream is a commentary track based on its title."""
+        title = stream.get('title', '').lower()
+        return 'commentary' in title or 'comentário' in title or 'comentario' in title or 'director' in title
         
     def get_stream_info(self, file_path: Path) -> Tuple[List[Dict], List[Dict], float, float]:
         """Get audio and subtitle stream information using ffprobe."""
@@ -46,8 +51,13 @@ class VideoProcessor:
             str(file_path)
         ]
         
-        audio_result = subprocess.run(audio_cmd, capture_output=True, text=True)
-        audio_data = json.loads(audio_result.stdout)
+        audio_result = subprocess.run(audio_cmd, capture_output=True, encoding='utf-8', errors='replace')
+        audio_text = audio_result.stdout or ''
+        try:
+            audio_data = json.loads(audio_text)
+        except Exception:
+            print(f"Warning: failed to parse ffprobe audio output for {file_path.name}; output (truncated):\n{audio_text[:1024]}")
+            audio_data = {}
         audio_streams = []
         
         for stream in audio_data.get('streams', []):
@@ -83,8 +93,13 @@ class VideoProcessor:
             str(file_path)
         ]
         
-        sub_result = subprocess.run(sub_cmd, capture_output=True, text=True)
-        sub_data = json.loads(sub_result.stdout)
+        sub_result = subprocess.run(sub_cmd, capture_output=True, encoding='utf-8', errors='replace')
+        sub_text = sub_result.stdout or ''
+        try:
+            sub_data = json.loads(sub_text)
+        except Exception:
+            print(f"Warning: failed to parse ffprobe subtitle output for {file_path.name}; output (truncated):\n{sub_text[:1024]}")
+            sub_data = {}
         subtitle_streams = []
         
         for stream in sub_data.get('streams', []):
@@ -104,9 +119,14 @@ class VideoProcessor:
             str(file_path)
         ]
         
-        format_result = subprocess.run(format_cmd, capture_output=True, text=True)
-        format_data = json.loads(format_result.stdout)
-        duration = float(format_data.get('format', {}).get('duration', 0))
+        format_result = subprocess.run(format_cmd, capture_output=True, encoding='utf-8', errors='replace')
+        format_text = format_result.stdout or ''
+        try:
+            format_data = json.loads(format_text)
+        except Exception:
+            print(f"Warning: failed to parse ffprobe format output for {file_path.name}; output (truncated):\n{format_text[:1024]}")
+            format_data = {}
+        duration = float(format_data.get('format', {}).get('duration', 0) or 0)
         
         # Get FPS
         fps_cmd = [
@@ -117,8 +137,13 @@ class VideoProcessor:
             str(file_path)
         ]
         
-        fps_result = subprocess.run(fps_cmd, capture_output=True, text=True)
-        fps_data = json.loads(fps_result.stdout)
+        fps_result = subprocess.run(fps_cmd, capture_output=True, encoding='utf-8', errors='replace')
+        fps_text = fps_result.stdout or ''
+        try:
+            fps_data = json.loads(fps_text)
+        except Exception:
+            print(f"Warning: failed to parse ffprobe fps output for {file_path.name}; output (truncated):\n{fps_text[:1024]}")
+            fps_data = {}
         fps_str = fps_data.get('streams', [{}])[0].get('r_frame_rate', '24/1')
         
         # Parse fps (e.g., "24000/1001" or "24")
@@ -174,10 +199,9 @@ class VideoProcessor:
                 filtered_audio = []
                 for s in audio_streams:
                     # Keep if: in desired language OR is commentary
-                    is_commentary = 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']
-                    if s['language'] in self.desired_languages or is_commentary:
+                    if s['language'] in self.desired_languages or self.is_commentary_track(s):
                         filtered_audio.append(s)
-                        if is_commentary:
+                        if self.is_commentary_track(s):
                             print(f"Keeping commentary track: Index {s['index']}")
                 audio_streams = filtered_audio
             
@@ -201,7 +225,7 @@ class VideoProcessor:
                 return False
 
             # Filter out commentary tracks for selection purposes
-            non_commentary = [s for s in audio_streams if 'commentary' not in s['title'] and 'comentário' not in s['title'] and 'comentario' not in s['title']]
+            non_commentary = [s for s in audio_streams if not self.is_commentary_track(s)]
             
             if not non_commentary:
                 print(f"Skipping: {file_path.name} (only commentary tracks found)")
@@ -259,7 +283,7 @@ class VideoProcessor:
             if is_already_good:
                 # Best stream is already good AC3/E-AC3, just strip others
                 # But keep commentary tracks!
-                commentary_tracks = [s for s in audio_streams if 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']]
+                commentary_tracks = [s for s in audio_streams if self.is_commentary_track(s)]
                 streams_to_keep = [best_stream] + commentary_tracks
                 
                 return self._process_keep_single_stream(file_path, streams_to_keep,
@@ -267,7 +291,7 @@ class VideoProcessor:
             else:
                 # Convert best stream to E-AC3 at appropriate bitrate
                 # Keep commentary tracks as-is
-                commentary_tracks = [s for s in audio_streams if 'commentary' in s['title'] or 'comentário' in s['title'] or 'comentario' in s['title']]
+                commentary_tracks = [s for s in audio_streams if self.is_commentary_track(s)]
                 
                 return self._process_convert_single_to_eac3(file_path, best_stream, commentary_tracks,
                                                            subtitle_streams, duration, fps)
@@ -348,8 +372,13 @@ class VideoProcessor:
                     '-of', 'json',
                     str(input_file)
                 ]
-                video_result = subprocess.run(video_cmd, capture_output=True, text=True)
-                video_data = json.loads(video_result.stdout)
+                video_result = subprocess.run(video_cmd, capture_output=True, encoding='utf-8', errors='replace')
+                video_text = video_result.stdout or ''
+                try:
+                    video_data = json.loads(video_text)
+                except Exception:
+                    print(f"Warning: failed to parse ffprobe video bitrate output for {file_name}; output (truncated):\n{video_text[:1024]}")
+                    video_data = {}
                 video_bitrate = video_data.get('streams', [{}])[0].get('bit_rate')
                 
                 if video_bitrate:
@@ -373,8 +402,9 @@ class VideoProcessor:
             cmd_with_progress.append(cmd[-1])
             
             # Start ffmpeg
+            # Use text mode for pipes so we receive str and avoid manual decoding
             process = subprocess.Popen(cmd_with_progress, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE, text=False)
+                                      stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace')
             
             start_time = time.time()
             last_update = 0
@@ -466,11 +496,10 @@ class VideoProcessor:
                 print(f"\rProgress: FAILED!                                             ")
                 print(f"\nffmpeg exited with error code {process.returncode}")
                 
-                # Display stderr
+                # Display stderr (already text due to Popen text=True)
                 if stderr_data:
-                    stderr_output = stderr_data.decode('utf-8', errors='replace')
                     print("\nffmpeg error output:")
-                    print(stderr_output)
+                    print(stderr_data)
                 
                 return False
         
