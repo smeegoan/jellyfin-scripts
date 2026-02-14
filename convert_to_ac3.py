@@ -231,17 +231,25 @@ class VideoProcessor:
                 print(f"Skipping: {file_path.name} (only commentary tracks found)")
                 return False
 
-            # Prefer existing AC3/E-AC3 streams over lossless formats that need conversion
-            # This avoids unnecessary conversion and potential quality loss
-            ac3_streams = [s for s in non_commentary if s['codec'] in ('ac3', 'eac3')]
+            # First priority: Check for Atmos streams (best quality for capable systems)
+            atmos_streams = [s for s in non_commentary if 'atmos' in s['title']]
             
-            if ac3_streams:
-                # Select best AC3/E-AC3 stream by channels, then bitrate
-                best_stream = max(ac3_streams, key=lambda s: (s['channels'], s['bitrate']))
-                print(f"Found existing AC3/E-AC3 stream - will use instead of converting")
+            if atmos_streams:
+                # Select best Atmos stream by channels, then bitrate
+                best_stream = max(atmos_streams, key=lambda s: (s['channels'], s['bitrate']))
+                print(f"Found Atmos stream - preferring for best quality")
             else:
-                # No AC3/E-AC3 available, select stream with most channels for conversion
-                best_stream = max(non_commentary, key=lambda s: (s['channels'], s['bitrate']))
+                # Second priority: Prefer existing AC3/E-AC3 streams over lossless formats
+                # This avoids unnecessary conversion and potential quality loss
+                ac3_streams = [s for s in non_commentary if s['codec'] in ('ac3', 'eac3')]
+                
+                if ac3_streams:
+                    # Select best AC3/E-AC3 stream by channels, then bitrate
+                    best_stream = max(ac3_streams, key=lambda s: (s['channels'], s['bitrate']))
+                    print(f"Found existing AC3/E-AC3 stream - will use instead of converting")
+                else:
+                    # No AC3/E-AC3 available, select stream with most channels for conversion
+                    best_stream = max(non_commentary, key=lambda s: (s['channels'], s['bitrate']))
             
             print(f"\nBest audio stream: Index {best_stream['index']}, "
                   f"Codec {best_stream['codec']}, {best_stream['channels']}ch, "
